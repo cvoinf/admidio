@@ -9,7 +9,9 @@
  ***********************************************************************************************
  */
 
+use Admidio\Hooks\Hooks;
 use Admidio\Infrastructure\Database;
+use Admidio\Infrastructure\Plugins\PluginCrashGuard;
 use Admidio\Infrastructure\Utils\FileSystemUtils;
 
 if (basename($_SERVER['SCRIPT_FILENAME']) === 'shutdown.php') {
@@ -26,6 +28,19 @@ function admShutdown()
     // it will not come.
     if ($gDb instanceof Database && $gDb->isInTransaction()) {
         $gDb->runAfterRollbackCallbacks();
+    } elseif ($gDb instanceof Database && Hooks::hasAction('request_finished')) {
+        /*
+         * Work that does not have to delay the answer: the response is sent first, where PHP-FPM
+         * allows it, and the listeners run afterwards. A request that left a transaction open does
+         * not dispatch the action - everything a listener wrote would be rolled back with it.
+         *
+         * The CLI has no response to send; there the listeners simply run at the end.
+         */
+        if (PHP_SAPI !== 'cli' && function_exists('fastcgi_finish_request')) {
+            ignore_user_abort(true);
+            fastcgi_finish_request();
+        }
+        Hooks::doActionCatchErrors('request_finished');
     }
 
     $gLogger->info('SHUTDOWN', array(
@@ -34,4 +49,7 @@ function admShutdown()
     ));
 }
 
+// Registered first: the shutdown functions run in this order, and a warning in admShutdown() would
+// replace the fatal error of a plugin that the guard has to read.
+PluginCrashGuard::activate();
 register_shutdown_function('admShutdown');

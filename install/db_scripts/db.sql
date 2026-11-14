@@ -234,7 +234,7 @@ CREATE TABLE %PREFIX%_events
     dat_timestamp_change        timestamp           NULL        DEFAULT NULL,
     dat_allow_comments          boolean             NOT NULL    DEFAULT false,
     dat_additional_guests       boolean             NOT NULL    DEFAULT false,
-    dat_reminder_days           integer             NULL        DEFAULT 3,
+    dat_reminder_days           smallint            NOT NULL    DEFAULT 0,
     PRIMARY KEY (dat_id)
 )
 ENGINE = InnoDB
@@ -250,17 +250,15 @@ CREATE INDEX %PREFIX%_idx_dat_recurrence_status ON %PREFIX%_events (dat_recurren
 /*==============================================================*/
 CREATE TABLE %PREFIX%_event_reminder_sent
 (
-    ers_id                      integer unsigned    NOT NULL    AUTO_INCREMENT,
     ers_dat_id                  integer unsigned    NOT NULL,
     ers_usr_id                  integer unsigned    NOT NULL,
     ers_timestamp_sent          timestamp           NOT NULL    DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (ers_id)
+    PRIMARY KEY (ers_dat_id, ers_usr_id)
 )
 ENGINE = InnoDB
 DEFAULT CHARSET = utf8mb4
 COLLATE = utf8mb4_unicode_ci;
 
-CREATE UNIQUE INDEX %PREFIX%_idx_ers_dat_usr ON %PREFIX%_event_reminder_sent (ers_dat_id, ers_usr_id);
 CREATE INDEX %PREFIX%_idx_ers_usr ON %PREFIX%_event_reminder_sent (ers_usr_id);
 
 /*==============================================================*/

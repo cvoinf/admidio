@@ -3,6 +3,8 @@
 use Admidio\Application\Navigation;
 use Admidio\Changelog\Service\ChangelogService;
 use Admidio\Components\Entity\Component;
+use Admidio\Events\Service\EventReminderService;
+use Admidio\Hooks\Hooks;
 use Admidio\Infrastructure\ChangeNotification;
 use Admidio\Infrastructure\Database;
 use Admidio\Infrastructure\Language;
@@ -329,3 +331,9 @@ try {
 // once per day: report the memberships whose start or end date was reached, after the plugins are
 // loaded so that their listeners are called
 MembershipPeriodService::runIfDueSilently($gDb);
+
+// Send due event reminders after the response has been sent. The maintenance job runs the same
+// service from the existing maintenance:run cron entry.
+Hooks::addAction('request_finished', static function () use ($gDb): void {
+    EventReminderService::runIfDueSilently($gDb);
+}, 50, null, 'event-reminders');

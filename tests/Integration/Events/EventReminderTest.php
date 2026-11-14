@@ -3,13 +3,15 @@
  * Event reminder tests
  *
  * Reminder state is stored per event and user. The tests cover duplicate suppression,
- * skipping confirmed or declined participants and filtering disabled or cancelled events.
+ * skipping confirmed or declined participants, the due window, invited event-role members
+ * and filtering disabled or cancelled events.
  */
 
 namespace Admidio\Tests\Integration\Events;
 
 use Admidio\Events\Entity\Event;
 use Admidio\Events\Repository\EventReminderRepository;
+use Admidio\Events\Service\EventReminderService;
 use Admidio\Events\ValueObject\Participants;
 use Admidio\Roles\Entity\Membership;
 use Admidio\Roles\Entity\Role;
@@ -18,6 +20,7 @@ use Admidio\Tests\Support\AdmidioTestFixture;
 use Admidio\Tests\Support\DatabaseTestCase;
 use Admidio\Tests\Support\PermissionContext;
 use Admidio\Users\Entity\User;
+use Ramsey\Uuid\Uuid;
 
 class EventReminderTest extends DatabaseTestCase
 {
@@ -113,6 +116,13 @@ class EventReminderTest extends DatabaseTestCase
         $membership->startMembership($roleId, $userId, null, $approvalState);
     }
 
+    private function runService(): ?string
+    {
+        return $this->asAdministrator(function (): ?string {
+            return (new EventReminderService($this->getDatabase()))->runIfDue();
+        });
+    }
+
     /**
      * @testdox A due reminder is sent once per user and persisted
      */
@@ -133,14 +143,13 @@ class EventReminderTest extends DatabaseTestCase
         $GLOBALS['gDisableEmailSending'] = true;
 
         try {
-            $sent = (new Event($this->getDatabase(), $event['dat_id']))->sendReminderNotification();
-            $this->assertSame(1, $sent);
+            $this->assertSame('Sent 1 reminder(s) for 1 event(s).', $this->runService());
 
             $sql = 'SELECT COUNT(*) FROM ' . TBL_EVENT_REMINDER_SENT . ' WHERE ers_dat_id = ? AND ers_usr_id = ?';
             $this->assertSame(1, (int) $this->getDatabase()->queryPrepared($sql, [$event['dat_id'], $alice['usr_id']])->fetchColumn());
 
-            $sent = (new Event($this->getDatabase(), $event['dat_id']))->sendReminderNotification();
-            $this->assertSame(0, $sent);
+            $this->assertSame('Sent 0 reminder(s) for 1 event(s).', $this->runService());
+            $this->assertSame(1, (int) $this->getDatabase()->queryPrepared($sql, [$event['dat_id'], $alice['usr_id']])->fetchColumn());
         } finally {
             if ($previousDisableEmailSending === null) {
                 unset($GLOBALS['gDisableEmailSending']);
@@ -148,6 +157,31 @@ class EventReminderTest extends DatabaseTestCase
                 $GLOBALS['gDisableEmailSending'] = $previousDisableEmailSending;
             }
         }
+    }
+
+    /**
+     * @testdox A dry run counts due reminders without sending or persisting state
+     */
+    public function testDryRunDoesNotSendOrPersistState(): void
+    {
+        $fixture = $this->getFixture();
+        $eligibleRole = $fixture->createAndSaveRole('Reminder dry run', self::ORG_ID);
+        $alice = $this->createUserWithEmail($fixture, 'dryRunAlice', 'dry-run-alice@example.local');
+        $fixture->assignUserToRole($alice['usr_id'], $eligibleRole['rol_id']);
+
+        $event = $this->createEventWithReminder('Dry run event', date('Y-m-d', strtotime(DATE_NOW . ' +3 days')));
+        $this->asAdministrator(function () use ($event, $eligibleRole) {
+            (new RolesRights($this->getDatabase(), 'event_participation', $event['dat_id']))
+                ->addRoles([$eligibleRole['rol_id']]);
+        });
+
+        $result = $this->asAdministrator(function (): ?string {
+            return (new EventReminderService($this->getDatabase()))->runIfDue(true);
+        });
+
+        $this->assertSame('Would send 1 reminder(s) for 1 event(s).', $result);
+        $sql = 'SELECT COUNT(*) FROM ' . TBL_EVENT_REMINDER_SENT . ' WHERE ers_dat_id = ?';
+        $this->assertSame(0, (int) $this->getDatabase()->queryPrepared($sql, [$event['dat_id']])->fetchColumn());
     }
 
     /**
@@ -177,8 +211,7 @@ class EventReminderTest extends DatabaseTestCase
         $GLOBALS['gDisableEmailSending'] = true;
 
         try {
-            $sent = (new Event($this->getDatabase(), $event['dat_id']))->sendReminderNotification();
-            $this->assertSame(1, $sent);
+            $this->assertSame('Sent 1 reminder(s) for 1 event(s).', $this->runService());
 
             $sql = 'SELECT ers_usr_id FROM ' . TBL_EVENT_REMINDER_SENT . ' WHERE ers_dat_id = ?';
             $remindedUserIds = array_map(
@@ -194,6 +227,77 @@ class EventReminderTest extends DatabaseTestCase
                 $GLOBALS['gDisableEmailSending'] = $previousDisableEmailSending;
             }
         }
+    }
+
+    /**
+     * @testdox An invited member of the event role is reminded even without an authorized role
+     */
+    public function testInvitedEventRoleMemberIsReminded(): void
+    {
+        $fixture = $this->getFixture();
+        $alice = $this->createUserWithEmail($fixture, 'invitedAlice', 'invited-alice@example.local');
+
+        $event = $this->createEventWithReminder('Invited reminder event', date('Y-m-d', strtotime(DATE_NOW . ' +3 days')));
+        $this->asAdministrator(function () use ($event, $alice) {
+            $this->setParticipationMembership($event['rol_id'], $alice['usr_id'], Participants::STATE_INVITED);
+        });
+
+        $previousDisableEmailSending = $GLOBALS['gDisableEmailSending'] ?? null;
+        $GLOBALS['gDisableEmailSending'] = true;
+
+        try {
+            $this->assertSame('Sent 1 reminder(s) for 1 event(s).', $this->runService());
+
+            $sql = 'SELECT COUNT(*) FROM ' . TBL_EVENT_REMINDER_SENT . ' WHERE ers_dat_id = ? AND ers_usr_id = ?';
+            $this->assertSame(1, (int) $this->getDatabase()->queryPrepared($sql, [$event['dat_id'], $alice['usr_id']])->fetchColumn());
+        } finally {
+            if ($previousDisableEmailSending === null) {
+                unset($GLOBALS['gDisableEmailSending']);
+            } else {
+                $GLOBALS['gDisableEmailSending'] = $previousDisableEmailSending;
+            }
+        }
+    }
+
+    /**
+     * @testdox The due window catches up missed days and ignores events outside the window
+     */
+    public function testDueWindowCatchesUpMissedDays(): void
+    {
+        $insideWindow = $this->createEventWithReminder('Inside window', date('Y-m-d', strtotime(DATE_NOW . ' +1 day')));
+        $outsideWindow = $this->createEventWithReminder('Outside window', date('Y-m-d', strtotime(DATE_NOW . ' +5 days')));
+
+        $dueEventIds = (new EventReminderRepository($this->getDatabase()))->getDueEventIds();
+        $this->assertContains($insideWindow['dat_id'], $dueEventIds);
+        $this->assertNotContains($outsideWindow['dat_id'], $dueEventIds);
+    }
+
+    /**
+     * @testdox Due events are limited to the current organization
+     */
+    public function testDueEventsAreLimitedToCurrentOrganization(): void
+    {
+        $fixture = $this->getFixture();
+        $otherOrg = $fixture->createAndSaveOrganization('Other organization', 'OTHER');
+        $otherCategory = $fixture->createAndSaveCategory('Other calendar', 'EVT', (int) $otherOrg['org_id']);
+
+        $begin = date('Y-m-d', strtotime(DATE_NOW . ' +3 days')) . ' 09:00:00';
+        $end = date('Y-m-d', strtotime(DATE_NOW . ' +3 days')) . ' 17:00:00';
+        $eventUuid = (string) Uuid::uuid4();
+        $this->getDatabase()->queryPrepared(
+            'INSERT INTO ' . TBL_EVENTS . ' (dat_cat_id, dat_uuid, dat_headline, dat_begin, dat_end, dat_reminder_days)
+             VALUES (?, ?, ?, ?, ?, ?)',
+            [(int) $otherCategory['cat_id'], $eventUuid, 'Other organization reminder', $begin, $end, 3]
+        );
+        $eventId = (int) $this->getDatabase()->queryPrepared(
+            'SELECT dat_id FROM ' . TBL_EVENTS . ' WHERE dat_uuid = ?',
+            [$eventUuid]
+        )->fetchColumn();
+
+        $dueEventIds = $this->asAdministrator(function (): array {
+            return (new EventReminderRepository($this->getDatabase()))->getDueEventIds();
+        });
+        $this->assertNotContains($eventId, $dueEventIds);
     }
 
     /**
